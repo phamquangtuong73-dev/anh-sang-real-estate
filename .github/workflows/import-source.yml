@@ -1,0 +1,100 @@
+name: Import Anh Sang source ZIP
+
+on:
+  push:
+    paths:
+      - 'anh-sang-real-estate-github-root.zip'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: anh-sang-source-import-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  import-and-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Safely extract source ZIP
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path, PurePosixPath
+          from zipfile import ZipFile
+          import shutil
+
+          archive = Path('anh-sang-real-estate-github-root.zip')
+          if not archive.is_file():
+              raise SystemExit('Missing source ZIP.')
+
+          target = Path('/tmp/anh-sang-source')
+          if target.exists():
+              shutil.rmtree(target)
+          target.mkdir(parents=True)
+
+          with ZipFile(archive) as zf:
+              for item in zf.infolist():
+                  name = item.filename.replace(chr(92), '/')
+                  path = PurePosixPath(name)
+                  if path.is_absolute() or '..' in path.parts:
+                      raise SystemExit('Unsafe ZIP entry: ' + name)
+              zf.extractall(target)
+
+          required = ['package.json', 'index.html', 'src']
+          missing = [name for name in required if not (target / name).exists()]
+          if missing:
+              raise SystemExit('Missing required files: ' + ', '.join(missing))
+
+          for source in target.iterdir():
+              if source.name in {'.git', '.github', 'anh-sang-real-estate-github-root.zip'}:
+                  continue
+              destination = Path(source.name)
+              if source.is_dir():
+                  shutil.copytree(source, destination, dirs_exist_ok=True)
+              else:
+                  shutil.copy2(source, destination)
+
+          vercel = Path('vercel.json')
+          if not vercel.exists():
+              vercel.write_text('{"buildCommand":"npm run build","outputDirectory":"dist","framework":"vite"}\n')
+
+          ignore = Path('.gitignore')
+          existing = ignore.read_text() if ignore.exists() else ''
+          additions = ['node_modules/', 'dist/', '*.tsbuildinfo', '.env', '.env.*', '!.env.example']
+          with ignore.open('a') as handle:
+              for entry in additions:
+                  if entry not in existing.splitlines():
+                      handle.write(entry + '\n')
+
+          archive.unlink()
+          PY
+
+      - name: Install dependencies and verify build
+        run: |
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Commit verified source
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+          else
+            git commit -m "Import and verify Anh Sang Real Estate source"
+            git push
+          fi
